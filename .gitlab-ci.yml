@@ -1,0 +1,26 @@
+stages:
+  - test
+
+default:
+  image: python:3.11
+  before_script:
+    - python --version
+    - pip install -r booking_service/requirements.txt
+    - pip install -r cleaning_service/requirements.txt
+    - pip install pytest
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# 1. ЮНИТ-ТЕСТЫ
+unit_tests:
+  stage: test
+  script:
+    - python -m pytest tests/test_cleaning_unit.py -v
+
+# 2. ИНТЕГРАЦИОННЫЕ ТЕСТЫ
+integration_tests:
+  stage: test
+  needs: ["unit_tests"]   # запускать только если unit_tests прошли
+  script:
+    - python -m pytest tests/test_booking_integration.py tests/test_cleaning_integration.py -v
