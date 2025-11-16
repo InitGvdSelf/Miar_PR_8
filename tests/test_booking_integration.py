@@ -1,47 +1,51 @@
-from datetime import date
+import os
+
+# 1. Подменяем URL базы данных ДО импорта приложения
+os.environ["POSTGRES_URL"] = "sqlite:///./test_booking.db"
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from booking_service.app.main import app
-from booking_service.app.database import Base, get_db
+from booking_service.app.database import Base, engine, SessionLocal, get_db
+from booking_service.app import rabbitmq as booking_rabbitmq
+from booking_service.app import routers as booking_routers
 
 
-# -----------------------------
-# Настраиваем тестовую БД (SQLite in-memory)
-# -----------------------------
-
-SQLALCHEMY_DATABASE_URL = "sqlite://"
-
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
-)
-TestingSessionLocal = sessionmaker(
-    autocommit=False, autoflush=False, bind=engine
-)
-
-# создаём таблицы в тестовой БД
+# 2. Создаём таблицы в тестовой SQLite-БД
 Base.metadata.create_all(bind=engine)
 
 
 def override_get_db():
-    db = TestingSessionLocal()
+    """
+    Тестовая версия зависимости get_db:
+    используем SessionLocal, который смотрит в SQLite.
+    """
+    db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
 
-# подменяем зависимость FastAPI на тестовую БД
+# 3. Подменяем зависимость FastAPI на тестовую БД
 app.dependency_overrides[get_db] = override_get_db
 
+
+# 4. Глушим отправку сообщений в RabbitMQ во время тестов
+async def dummy_send_booking_created(*args, **kwargs):
+    # Ничего не делаем – просто заглушка
+    return None
+
+
+# подменяем и в модуле rabbitmq, и в модуле routers,
+# чтобы background_tasks.add_task(send_booking_created, ...) использовал заглушку
+booking_rabbitmq.send_booking_created = dummy_send_booking_created
+booking_routers.send_booking_created = dummy_send_booking_created
+
+
+# 5. Создаём TestClient
 client = TestClient(app)
 
-
-# -----------------------------
-# Интеграционные тесты
-# -----------------------------
 
 def test_create_booking_success():
     """
@@ -52,10 +56,10 @@ def test_create_booking_success():
 
     payload = {
         "room_number": "101",
-        "guest_name": "Иван Иванов",
-        "guests_count": 2,
-        "check_in_date": "2025-11-20",
-        "check_out_date": "2025-11-23"
+            "guest_name": "Иван Иванов",
+            "guests_count": 2,
+            "check_in_date": "2025-11-20",
+            "check_out_date": "2025-11-23"
     }
 
     response = client.post("/api/bookings", json=payload)
