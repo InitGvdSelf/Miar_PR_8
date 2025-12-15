@@ -1,0 +1,139 @@
+name: CD - Build, Test and Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  # 1) Запуск всех тестов перед деплоем
+  test-before-deploy:
+    name: Test before deploy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [booking_service, cleaning_service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: ./${{ matrix.service }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run Unit Tests
+        working-directory: ./${{ matrix.service }}
+        run: |
+          # Запускаем unit-тесты если папка существует (как на скрине)
+          if [ -d "tests/unit" ]; then
+            pytest tests/unit/ -v --tb=short
+          elif [ -f "../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_unit.py" ]; then
+            # если unit-тесты лежат в корне репо (у тебя так и есть)
+            pytest ../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_unit.py -v --tb=short
+          else
+            echo "No unit tests found, skipping..."
+          fi
+
+      - name: Run Integration Tests
+        working-directory: ./${{ matrix.service }}
+        run: |
+          # Вариант 1: как на скрине (tests/test_api_*.py внутри сервиса)
+          if ls tests/test_api_*.py 1> /dev/null 2>&1; then
+            pytest tests/test_api_*.py -v --tb=short
+          # Вариант 2: интеграционные тесты в корне репо (у тебя так)
+          elif [ -f "../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_integration.py" ]; then
+            pytest ../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_integration.py -v --tb=short
+          else
+            echo "No integration tests found, skipping..."
+          fi
+
+  # 2) Сборка и публикация Docker-образов в DockerHub
+  build-and-push:
+    name: Build and push (DockerHub)
+    runs-on: ubuntu-latest
+    needs: [test-before-deploy]
+    strategy:
+      matrix:
+        service: [booking_service, cleaning_service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./${{ matrix.service }}/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/miar-pr8-${{ matrix.service }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 3) Сборка и публикация в Yandex Container Registry
+  build-and-push-yc:
+    name: Build and push (Yandex CR)
+    runs-on: ubuntu-latest
+    needs: [test-before-deploy]
+    strategy:
+      matrix:
+        service: [booking_service, cleaning_service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Yandex Cloud Container Registry
+        uses: yc-actions/yc-cr-login@v3
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON }}
+          # action логинит docker в cr.yandex (локально в раннере)  [oai_citation:1‡GitHub](https://github.com/yc-actions/yc-cr-login?utm_source=chatgpt.com)
+
+      - name: Build & push to Yandex CR
+        run: |
+          IMAGE="cr.yandex/${{ secrets.YC_CR_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}"
+          docker build -f ${{ matrix.service }}/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+  # 4) Деплой serverless-контейнеров в Yandex Cloud
+  deploy-sls-yc:
+    name: Deploy Serverless Containers (Yandex Cloud)
+    runs-on: ubuntu-latest
+    needs: [build-and-push-yc]
+    strategy:
+      matrix:
+        service: [booking_service, cleaning_service]
+
+    steps:
+      - name: Deploy Serverless Container
+        uses: yc-actions/yc-sls-container-deploy@v4
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON }}
+          folder-id: ${{ secrets.YC_FOLDER_ID }}
+          container-name: miar-pr8-${{ matrix.service }}
+          revision-service-account-id: ${{ secrets.YC_RUNTIME_SA_ID }}
+          revision-cores: 1
+          revision-memory: 512Mb
+          revision-core-fraction: 100
+          revision-concurrency: 8
+          revision-image-url: cr.yandex/${{ secrets.YC_CR_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
+          revision-execution-timeout: 10
+          # параметры и формат совпадают с документацией action  [oai_citation:2‡GitHub](https://github.com/yc-actions/yc-sls-container-deploy)
