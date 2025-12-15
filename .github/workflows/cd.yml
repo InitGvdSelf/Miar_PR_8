@@ -1,31 +1,33 @@
-name: CD - Build, Test and Deploy (debug)
+name: CD - Build, Test and Deploy
 
-"on":
+on:
   push:
     branches: ["main"]
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  PYTHON_VERSION: "3.11"
-
 jobs:
+  # 1) Тесты
   test-before-deploy:
     name: Test before deploy
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [booking_service, cleaning_service]
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
 
       - name: Install test dependencies
-        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -33,141 +35,226 @@ jobs:
           pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
-      - name: Run unit tests if exist
-        shell: bash
+      - name: Run Unit Tests (per service)
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
-          if ls tests/test_*_unit.py >/dev/null 2>&1; then
-            pytest -q tests/test_*_unit.py -v --tb=short
+
+          if [ "${{ matrix.service }}" = "booking_service" ]; then
+            if [ -f "tests/test_booking_unit.py" ]; then
+              pytest tests/test_booking_unit.py -v --tb=short
+            else
+              echo "No booking unit tests found, skipping..."
+            fi
           else
-            echo "No unit tests found (tests/test_*_unit.py), skipping..."
+            if [ -f "tests/test_cleaning_unit.py" ]; then
+              pytest tests/test_cleaning_unit.py -v --tb=short
+            else
+              echo "No cleaning unit tests found, skipping..."
+            fi
           fi
 
-      - name: Run integration tests if exist
-        shell: bash
+      - name: Run Integration Tests (per service)
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
-          if ls tests/test_*_integration.py >/dev/null 2>&1; then
-            pytest -q tests/test_*_integration.py -v --tb=short
+
+          if [ "${{ matrix.service }}" = "booking_service" ]; then
+            if [ -f "tests/test_booking_integration.py" ]; then
+              pytest tests/test_booking_integration.py -v --tb=short
+            else
+              echo "No booking integration tests found, skipping..."
+            fi
           else
-            echo "No integration tests found (tests/test_*_integration.py), skipping..."
+            if [ -f "tests/test_cleaning_integration.py" ]; then
+              pytest tests/test_cleaning_integration.py -v --tb=short
+            else
+              echo "No cleaning integration tests found, skipping..."
+            fi
           fi
 
-  build-and-push-ycr:
-    name: Build and push to YCR
+  # 2) Предпроверка Yandex (секреты, доступы, существование Registry, право на List containers)
+  yc-preflight:
+    name: YC preflight checks (auth + permissions)
     runs-on: ubuntu-latest
     needs: [test-before-deploy]
-    strategy:
-      matrix:
-        service: [booking_service, cleaning_service]
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Check required secrets present
-        shell: bash
+    steps:
+      - name: Basic secrets presence check
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+          FOLDER_ID: ${{ secrets.FOLDER_ID }}
+          SA_ID: ${{ secrets.SA_ID }}
         run: |
           set -euo pipefail
-          [ -n "${YC_KEYS:-}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
-          [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
-          echo "YC_REGISTRY_ID prefix: $(echo "$YC_REGISTRY_ID" | cut -c1-3)***"
+          test -n "${YC_KEYS:-}" || (echo "ERROR: secret YC_KEYS is empty" && exit 1)
+          test -n "${YC_REGISTRY_ID:-}" || (echo "ERROR: secret YC_REGISTRY_ID is empty" && exit 1)
+          test -n "${FOLDER_ID:-}" || (echo "ERROR: secret FOLDER_ID is empty" && exit 1)
+          test -n "${SA_ID:-}" || (echo "ERROR: secret SA_ID is empty" && exit 1)
 
-      - name: Print YC_KEYS ids only
-        shell: bash
+          echo "Secrets present:"
+          echo "  - YC_REGISTRY_ID length: ${#YC_REGISTRY_ID}"
+          echo "  - FOLDER_ID length: ${#FOLDER_ID}"
+          echo "  - SA_ID length: ${#SA_ID}"
+          echo "  - YC_KEYS length: ${#YC_KEYS}"
+
+      - name: Generate IAM token from YC_KEYS (authorized key JSON)
+        id: iam
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
         run: |
           set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "pyjwt[crypto]" requests
+
           python - <<'PY'
-          import json, os
-          j = json.loads(os.environ["YC_KEYS"])
-          print("YC_KEYS.service_account_id =", j.get("service_account_id"))
-          print("YC_KEYS.cloud_id          =", j.get("cloud_id"))
-          print("YC_KEYS.folder_id         =", j.get("folder_id"))
+          import os, json, time
+          import jwt
+          import requests
+
+          data = json.loads(os.environ["YC_KEYS"])
+
+          sa_id = data.get("service_account_id")
+          key_id = data.get("id")  # authorized key id
+          private_key = data.get("private_key")
+
+          if not sa_id or not key_id or not private_key:
+            raise SystemExit("YC_KEYS JSON must include service_account_id, id, private_key")
+
+          now = int(time.time())
+          payload = {
+            "aud": "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+            "iss": sa_id,
+            "iat": now,
+            "exp": now + 360,
+          }
+          headers = {"kid": key_id}
+
+          signed_jwt = jwt.encode(payload, private_key, algorithm="PS256", headers=headers)
+          r = requests.post(
+            "https://iam.api.cloud.yandex.net/iam/v1/tokens",
+            json={"jwt": signed_jwt},
+            timeout=30,
+          )
+          if r.status_code != 200:
+            raise SystemExit(f"IAM token exchange failed: {r.status_code} {r.text}")
+
+          iam_token = r.json()["iamToken"]
+          print("::add-mask::" + iam_token)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"iam_token={iam_token}\n")
+
+          # print safe debug
+          print(f"SA from YC_KEYS: {sa_id}")
+          print(f"Key ID from YC_KEYS: {key_id}")
           PY
 
-      - name: Login to YCR
+      - name: Check Registry exists (Registry.Get)
+        env:
+          IAM_TOKEN: ${{ steps.iam.outputs.iam_token }}
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          set -euo pipefail
+          URL="https://container-registry.api.cloud.yandex.net/container-registry/v1/registries/${YC_REGISTRY_ID}"
+
+          code="$(curl -sS -o /tmp/registry.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${IAM_TOKEN}" \
+            "${URL}")"
+
+          echo "Registry.Get HTTP ${code}"
+          cat /tmp/registry.json || true
+
+          if [ "${code}" != "200" ]; then
+            echo "ERROR: Registry.Get failed. Usually means:"
+            echo "  - YC_REGISTRY_ID is wrong (404), OR"
+            echo "  - service account has no rights to Container Registry (403)."
+            exit 1
+          fi
+
+      - name: Check Serverless Containers access (Container.List)
+        env:
+          IAM_TOKEN: ${{ steps.iam.outputs.iam_token }}
+          FOLDER_ID: ${{ secrets.FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          URL="https://serverless-containers.api.cloud.yandex.net/containers/v1/containers?folderId=${FOLDER_ID}"
+
+          code="$(curl -sS -o /tmp/containers.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${IAM_TOKEN}" \
+            "${URL}")"
+
+          echo "Container.List HTTP ${code}"
+          cat /tmp/containers.json || true
+
+          if [ "${code}" = "403" ]; then
+            echo "ERROR: PERMISSION_DENIED on Container.List."
+            echo "Fix in Yandex Cloud Console:"
+            echo "  - give role 'serverless-containers.editor' to the SAME service account used in YC_KEYS"
+            echo "    on the folder (FOLDER_ID) where you deploy."
+            exit 1
+          fi
+
+          if [ "${code}" != "200" ]; then
+            echo "ERROR: Container.List failed with HTTP ${code}"
+            exit 1
+          fi
+
+  # 3) Пуш в YCR (latest + sha)
+  build-and-push-ycr:
+    name: Build and push to YCR
+    runs-on: ubuntu-latest
+    needs: [yc-preflight]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [booking_service, cleaning_service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Yandex Container Registry
         uses: yc-actions/yc-cr-login@v3
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: Setup yc CLI
-        uses: yc-actions/yc-setup@v2
-        with:
-          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
-
-      - name: Check registry access best effort
-        shell: bash
+      - name: Build & push (latest + sha)
         env:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
           set -euo pipefail
-          yc --version
-          yc container registry get "$YC_REGISTRY_ID" || true
 
-      - name: Build and push images latest and sha
-        shell: bash
-        env:
-          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-        run: |
-          set -euo pipefail
           IMAGE_BASE="cr.yandex/${YC_REGISTRY_ID}/miar-pr8-${{ matrix.service }}"
-          docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_BASE}:latest" -t "${IMAGE_BASE}:${GITHUB_SHA}" .
-          docker push "${IMAGE_BASE}:latest"
-          docker push "${IMAGE_BASE}:${GITHUB_SHA}"
+          IMAGE_LATEST="${IMAGE_BASE}:latest"
+          IMAGE_SHA="${IMAGE_BASE}:${GITHUB_SHA}"
 
+          echo "Building:"
+          echo "  ${IMAGE_LATEST}"
+          echo "  ${IMAGE_SHA}"
+
+          docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_LATEST}" -t "${IMAGE_SHA}" .
+          docker push "${IMAGE_LATEST}"
+          docker push "${IMAGE_SHA}"
+
+  # 4) Деплой в Serverless Containers (берём sha-тег, чтобы было детерминированно)
   deploy-sls-yc:
     name: Deploy to Yandex Serverless Containers
     runs-on: ubuntu-latest
     needs: [build-and-push-ycr]
     strategy:
+      fail-fast: false
       matrix:
         service: [booking_service, cleaning_service]
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check deploy secrets present
-        shell: bash
-        env:
-          YC_KEYS: ${{ secrets.YC_KEYS }}
-          FOLDER_ID: ${{ secrets.FOLDER_ID }}
-          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-          SA_ID: ${{ secrets.SA_ID }}
-        run: |
-          set -euo pipefail
-          [ -n "${YC_KEYS:-}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
-          [ -n "${FOLDER_ID:-}" ] || (echo "FOLDER_ID is EMPTY" && exit 1)
-          [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
-          [ -n "${SA_ID:-}" ] || (echo "SA_ID is EMPTY" && exit 1)
-          echo "FOLDER_ID prefix: $(echo "$FOLDER_ID" | cut -c1-4)***"
-          echo "SA_ID prefix: $(echo "$SA_ID" | cut -c1-4)***"
-          echo "YC_REGISTRY_ID prefix: $(echo "$YC_REGISTRY_ID" | cut -c1-3)***"
-
-      - name: Setup yc CLI for deploy
-        uses: yc-actions/yc-setup@v2
-        with:
-          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
-
-      - name: Check serverless containers list
-        shell: bash
-        env:
-          FOLDER_ID: ${{ secrets.FOLDER_ID }}
-        run: |
-          set -euo pipefail
-          yc serverless container list --folder-id "$FOLDER_ID"
-
-      - name: Deploy serverless container sha revision
+      - name: Deploy
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.FOLDER_ID }}
           container-name: miar-pr8-${{ matrix.service }}
-          revision-service-account-id: ${{ secrets.SA_ID }}
           revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
+          revision-service-account-id: ${{ secrets.SA_ID }}
           revision-cores: 1
           revision-memory: 512Mb
           revision-core-fraction: 100
@@ -178,11 +265,12 @@ jobs:
   all-deployed:
     name: All deployed
     runs-on: ubuntu-latest
-    needs: [test-before-deploy, build-and-push-ycr, deploy-sls-yc]
+    needs: [test-before-deploy, yc-preflight, build-and-push-ycr, deploy-sls-yc]
     steps:
       - name: Done
         run: |
           echo "Yandex CD OK"
           echo "  - Tests: OK"
+          echo "  - YC preflight: OK"
           echo "  - Pushed to YCR: OK"
           echo "  - Deployed SLS containers: OK"
