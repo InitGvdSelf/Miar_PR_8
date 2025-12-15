@@ -73,7 +73,6 @@ jobs:
       matrix:
         service: [booking_service, cleaning_service]
 
-
     steps:
       - uses: actions/checkout@v4
 
