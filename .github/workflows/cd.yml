@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [booking_service, cleaning_service]
+        service: [ booking_service, cleaning_service ]
 
     steps:
       - uses: actions/checkout@v4
@@ -22,37 +22,47 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        working-directory: ./${{ matrix.service }}
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r booking_service/requirements.txt
+          pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov
 
-      - name: Run Unit Tests
-        working-directory: ./${{ matrix.service }}
+      - name: Run Unit Tests (per service)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          # Запускаем unit-тесты если папка существует (как на скрине)
-          if [ -d "tests/unit" ]; then
-            pytest tests/unit/ -v --tb=short
-          elif [ -f "../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_unit.py" ]; then
-            # если unit-тесты лежат в корне репо (у тебя так и есть)
-            pytest ../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_unit.py -v --tb=short
+          if [ "${{ matrix.service }}" = "booking_service" ]; then
+            if [ -f "tests/test_booking_unit.py" ]; then
+              pytest tests/test_booking_unit.py -v -tb=short
+            else
+              echo "No booking unit tests found, skipping..."
+            fi
           else
-            echo "No unit tests found, skipping..."
+            if [ -f "tests/test_cleaning_unit.py" ]; then
+              pytest tests/test_cleaning_unit.py -v -tb=short
+            else
+              echo "No cleaning unit tests found, skipping..."
+            fi
           fi
 
-      - name: Run Integration Tests
-        working-directory: ./${{ matrix.service }}
+      - name: Run Integration Tests (per service)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          # Вариант 1: как на скрине (tests/test_api_*.py внутри сервиса)
-          if ls tests/test_api_*.py 1> /dev/null 2>&1; then
-            pytest tests/test_api_*.py -v --tb=short
-          # Вариант 2: интеграционные тесты в корне репо (у тебя так)
-          elif [ -f "../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_integration.py" ]; then
-            pytest ../tests/test_${{ matrix.service == 'booking_service' && 'booking' || 'cleaning' }}_integration.py -v --tb=short
+          if [ "${{ matrix.service }}" = "booking_service" ]; then
+            if [ -f "tests/test_booking_integration.py" ]; then
+              pytest tests/test_booking_integration.py -v -tb=short
+            else
+              echo "No booking integration tests found, skipping..."
+            fi
           else
-            echo "No integration tests found, skipping..."
+            if [ -f "tests/test_cleaning_integration.py" ]; then
+              pytest tests/test_cleaning_integration.py -v -tb=short
+            else
+              echo "No cleaning integration tests found, skipping..."
+            fi
           fi
 
   # 2) Сборка и публикация Docker-образов в DockerHub
