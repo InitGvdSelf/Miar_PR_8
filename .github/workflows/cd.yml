@@ -1,9 +1,9 @@
 name: CD - Build, Test and Deploy (debug)
 
-on:
+"on":
   push:
     branches: ["main"]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 concurrency:
   group: cd-${{ github.ref }}
@@ -16,7 +16,6 @@ jobs:
   test-before-deploy:
     name: Test before deploy
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +25,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install test dependencies
+        shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -33,7 +33,8 @@ jobs:
           pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
-      - name: Run unit tests (if exist)
+      - name: Run unit tests if exist
+        shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
@@ -43,7 +44,8 @@ jobs:
             echo "No unit tests found (tests/test_*_unit.py), skipping..."
           fi
 
-      - name: Run integration tests (if exist)
+      - name: Run integration tests if exist
+        shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
@@ -60,11 +62,11 @@ jobs:
     strategy:
       matrix:
         service: [booking_service, cleaning_service]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check required secrets are present
+      - name: Check required secrets present
+        shell: bash
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
@@ -72,9 +74,10 @@ jobs:
           set -euo pipefail
           [ -n "${YC_KEYS:-}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
           [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
-          echo "YC_REGISTRY_ID prefix: ${YC_REGISTRY_ID:0:3}***"
+          echo "YC_REGISTRY_ID prefix: $(echo "$YC_REGISTRY_ID" | cut -c1-3)***"
 
-      - name: Parse YC_KEYS JSON (print only IDs)
+      - name: Print YC_KEYS ids only
+        shell: bash
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
         run: |
@@ -87,7 +90,7 @@ jobs:
           print("YC_KEYS.folder_id         =", j.get("folder_id"))
           PY
 
-      - name: Auth to Yandex Container Registry
+      - name: Login to YCR
         uses: yc-actions/yc-cr-login@v3
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
@@ -97,27 +100,25 @@ jobs:
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: Smoke check: registry access (best effort)
+      - name: Check registry access best effort
+        shell: bash
         env:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
           set -euo pipefail
           yc --version
-          yc container registry get "${YC_REGISTRY_ID}" || true
+          yc container registry get "$YC_REGISTRY_ID" || true
 
-      - name: Build & push images (latest + sha)
+      - name: Build and push images latest and sha
+        shell: bash
         env:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
           set -euo pipefail
           IMAGE_BASE="cr.yandex/${YC_REGISTRY_ID}/miar-pr8-${{ matrix.service }}"
-          IMAGE_LATEST="${IMAGE_BASE}:latest"
-          IMAGE_SHA="${IMAGE_BASE}:${GITHUB_SHA}"
-
-          echo "Building ${IMAGE_LATEST} and ${IMAGE_SHA}"
-          docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_LATEST}" -t "${IMAGE_SHA}" .
-          docker push "${IMAGE_LATEST}"
-          docker push "${IMAGE_SHA}"
+          docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_BASE}:latest" -t "${IMAGE_BASE}:${GITHUB_SHA}" .
+          docker push "${IMAGE_BASE}:latest"
+          docker push "${IMAGE_BASE}:${GITHUB_SHA}"
 
   deploy-sls-yc:
     name: Deploy to Yandex Serverless Containers
@@ -126,11 +127,11 @@ jobs:
     strategy:
       matrix:
         service: [booking_service, cleaning_service]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check deploy secrets are present
+      - name: Check deploy secrets present
+        shell: bash
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
           FOLDER_ID: ${{ secrets.FOLDER_ID }}
@@ -142,24 +143,24 @@ jobs:
           [ -n "${FOLDER_ID:-}" ] || (echo "FOLDER_ID is EMPTY" && exit 1)
           [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
           [ -n "${SA_ID:-}" ] || (echo "SA_ID is EMPTY" && exit 1)
-          echo "FOLDER_ID prefix: ${FOLDER_ID:0:4}***"
-          echo "SA_ID prefix: ${SA_ID:0:4}***"
-          echo "YC_REGISTRY_ID prefix: ${YC_REGISTRY_ID:0:3}***"
+          echo "FOLDER_ID prefix: $(echo "$FOLDER_ID" | cut -c1-4)***"
+          echo "SA_ID prefix: $(echo "$SA_ID" | cut -c1-4)***"
+          echo "YC_REGISTRY_ID prefix: $(echo "$YC_REGISTRY_ID" | cut -c1-3)***"
 
-      - name: Setup yc CLI
+      - name: Setup yc CLI for deploy
         uses: yc-actions/yc-setup@v2
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: Smoke check: can list serverless containers in folder
+      - name: Check serverless containers list
+        shell: bash
         env:
           FOLDER_ID: ${{ secrets.FOLDER_ID }}
         run: |
           set -euo pipefail
-          yc --version
-          yc serverless container list --folder-id "${FOLDER_ID}"
+          yc serverless container list --folder-id "$FOLDER_ID"
 
-      - name: Deploy serverless container (SHA revision)
+      - name: Deploy serverless container sha revision
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
