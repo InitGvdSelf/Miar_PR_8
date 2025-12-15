@@ -155,7 +155,7 @@ jobs:
   all-deployed:
     name: All deployed
     runs-on: ubuntu-latest
-    needs: [ test-before-deploy, build-and-push-ycr, deploy-sls ]
+    needs: [ test-before-deploy, build-and-push-ycr, deploy-sls-yc ]
     steps:
       - name: Done
         run: |
