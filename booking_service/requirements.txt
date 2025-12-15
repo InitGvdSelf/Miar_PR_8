@@ -5,3 +5,4 @@ psycopg2-binary
 pydantic<2
 aio-pika
 python-dotenv
+prometheus-fastapi-instrumentator
