@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [ booking_service, cleaning_service ]
+        service: [booking_service, cleaning_service]
 
     steps:
       - uses: actions/checkout@v4
@@ -35,13 +35,13 @@ jobs:
         run: |
           if [ "${{ matrix.service }}" = "booking_service" ]; then
             if [ -f "tests/test_booking_unit.py" ]; then
-              pytest tests/test_booking_unit.py -v -tb=short
+              pytest tests/test_booking_unit.py -v --tb=short
             else
               echo "No booking unit tests found, skipping..."
             fi
           else
             if [ -f "tests/test_cleaning_unit.py" ]; then
-              pytest tests/test_cleaning_unit.py -v -tb=short
+              pytest tests/test_cleaning_unit.py -v --tb=short
             else
               echo "No cleaning unit tests found, skipping..."
             fi
@@ -53,13 +53,13 @@ jobs:
         run: |
           if [ "${{ matrix.service }}" = "booking_service" ]; then
             if [ -f "tests/test_booking_integration.py" ]; then
-              pytest tests/test_booking_integration.py -v -tb=short
+              pytest tests/test_booking_integration.py -v --tb=short
             else
               echo "No booking integration tests found, skipping..."
             fi
           else
             if [ -f "tests/test_cleaning_integration.py" ]; then
-              pytest tests/test_cleaning_integration.py -v -tb=short
+              pytest tests/test_cleaning_integration.py -v --tb=short
             else
               echo "No cleaning integration tests found, skipping..."
             fi
