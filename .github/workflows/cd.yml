@@ -24,17 +24,15 @@ jobs:
 
       - name: Install test dependencies
         run: |
-      - name: Install test dependencies
-        run: |
           python -m pip install --upgrade pip
           pip install -r booking_service/requirements.txt
           pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
       - name: Run Unit Tests (per service)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
+
           if [ "${{ matrix.service }}" = "booking_service" ]; then
             if [ -f "tests/test_booking_unit.py" ]; then
               pytest tests/test_booking_unit.py -v --tb=short
@@ -50,9 +48,9 @@ jobs:
           fi
 
       - name: Run Integration Tests (per service)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
+
           if [ "${{ matrix.service }}" = "booking_service" ]; then
             if [ -f "tests/test_booking_integration.py" ]; then
               pytest tests/test_booking_integration.py -v --tb=short
@@ -117,7 +115,6 @@ jobs:
         uses: yc-actions/yc-cr-login@v3
         with:
           yc-sa-json-credentials: ${{ secrets.YC_SA_JSON }}
-          # action логинит docker в cr.yandex (локально в раннере)  [oai_citation:1‡GitHub](https://github.com/yc-actions/yc-cr-login?utm_source=chatgpt.com)
 
       - name: Build & push to Yandex CR
         run: |
@@ -148,4 +145,3 @@ jobs:
           revision-concurrency: 8
           revision-image-url: cr.yandex/${{ secrets.YC_CR_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
           revision-execution-timeout: 10
-          # параметры и формат совпадают с документацией action  [oai_citation:2‡GitHub](https://github.com/yc-actions/yc-sls-container-deploy)

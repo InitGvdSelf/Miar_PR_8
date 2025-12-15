@@ -33,10 +33,7 @@ jobs:
           TARGET="app"
           [ -d "$TARGET" ] || TARGET="."
 
-          # Проверка синтаксических ошибок
           flake8 "$TARGET" --count --select=E9,F63,F7,F82 --show-source --statistics
-
-          # Стилистические предупреждения (не валим пайплайн)
           flake8 "$TARGET" --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check code formatting with black
@@ -74,6 +71,7 @@ jobs:
 
       - name: Run Unit Tests
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
           pytest tests/test_*_unit.py -v --tb=short
 
   integration-tests:
@@ -93,10 +91,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r booking_service/requirements.txt
           pip install -r cleaning_service/requirements.txt
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
       - name: Run Integration Tests
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
           pytest tests/test_*_integration.py -v --tb=short
 
   all-tests-passed:
