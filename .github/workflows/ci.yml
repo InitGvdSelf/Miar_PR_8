@@ -97,7 +97,7 @@ jobs:
 
       - name: Run Integration Tests
         run: |
-          pytest tests/test_*_integration.py -v -tb=short
+          pytest tests/test_*_integration.py -v --tb=short
 
   all-tests-passed:
     name: All Tests Passed
