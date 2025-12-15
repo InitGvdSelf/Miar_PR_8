@@ -135,7 +135,6 @@ jobs:
     strategy:
       matrix:
         service: [ booking_service, cleaning_service ]
-
     steps:
       - name: Deploy to Yandex Serverless Containers
         uses: yc-actions/yc-sls-container-deploy@v4
