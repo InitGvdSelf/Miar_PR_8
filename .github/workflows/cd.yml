@@ -100,8 +100,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   # 3) Сборка и публикация в Yandex Container Registry
-  build-and-push-yc:
-    name: Build and push (Yandex CR)
+  build-and-push-ycr:
+    name: Build and push to YCR
     runs-on: ubuntu-latest
     needs: [test-before-deploy]
     strategy:
@@ -111,37 +111,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to Yandex Cloud Container Registry
+      - name: Auth to Yandex Container Registry
         uses: yc-actions/yc-cr-login@v3
         with:
-          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON }}
+          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: Build & push to Yandex CR
+      - name: Build & push (latest + sha)
         run: |
-          IMAGE="cr.yandex/${{ secrets.YC_CR_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}"
-          docker build -f ${{ matrix.service }}/Dockerfile -t "$IMAGE" .
-          docker push "$IMAGE"
+          IMAGE_BASE="cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}"
+          IMAGE_LATEST="${IMAGE_BASE}:latest"
+          IMAGE_SHA="${IMAGE_BASE}:${{ github.sha }}"
+
+          docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_LATEST}" -t "${IMAGE_SHA}" .
+          docker push "${IMAGE_LATEST}"
+          docker push "${IMAGE_SHA}"
+
 
   # 4) Деплой serverless-контейнеров в Yandex Cloud
-  deploy-sls-yc:
-    name: Deploy Serverless Containers (Yandex Cloud)
+  deploy-sls:
+    name: Deploy Serverless Containers
     runs-on: ubuntu-latest
-    needs: [build-and-push-yc]
+    needs: [ build-and-push-ycr ]
     strategy:
       matrix:
-        service: [booking_service, cleaning_service]
+        service: [ booking_service, cleaning_service ]
 
     steps:
-      - name: Deploy Serverless Container
+      - name: Deploy serverless container
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
-          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON }}
+          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.YC_FOLDER_ID }}
+
+          # контейнеры будут называться: miar-pr8-booking_service и miar-pr8-cleaning_service
           container-name: miar-pr8-${{ matrix.service }}
-          revision-service-account-id: ${{ secrets.YC_RUNTIME_SA_ID }}
+
+          # ID сервисного аккаунта, от имени которого будет работать ревизия
+          revision-service-account-id: ${{ secrets.YC_SA_ID }}
+
           revision-cores: 1
           revision-memory: 512Mb
           revision-core-fraction: 100
           revision-concurrency: 8
-          revision-image-url: cr.yandex/${{ secrets.YC_CR_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
           revision-execution-timeout: 10
+
+          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
+
+          # если нужны переменные окружения — раскомментируй и добавь secrets
+          # revision-env: |
+          #   AMQP_URL=${{ secrets.ENV_AMQP_URL }}
+          #   POSTGRES_URL=${{ secrets.ENV_POSTGRES_URL }}
+
+  all-deployed:
+    name: All deployed
+    runs-on: ubuntu-latest
+    needs: [ test-before-deploy, build-and-push-ycr, deploy-sls ]
+    steps:
+      - name: Done
+        run: |
+          echo "Yandex CD OK"
+          echo "  - Tests: OK"
+          echo "  - Pushed to YCR: OK"
+          echo "  - Deployed SLS containers: OK"
