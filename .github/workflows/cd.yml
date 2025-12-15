@@ -1,105 +1,58 @@
-name: CD - Build, Test and Deploy
+name: CD - Build, Test and Deploy (with deep debug)
 
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
 jobs:
-  # 1) Запуск всех тестов перед деплоем
   test-before-deploy:
     name: Test before deploy
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [booking_service, cleaning_service]
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install test dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r booking_service/requirements.txt
           pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
-      - name: Run Unit Tests (per service)
+      - name: Run unit tests (if exist)
         run: |
+          set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
-
-          if [ "${{ matrix.service }}" = "booking_service" ]; then
-            if [ -f "tests/test_booking_unit.py" ]; then
-              pytest tests/test_booking_unit.py -v --tb=short
-            else
-              echo "No booking unit tests found, skipping..."
-            fi
+          if ls tests/test_*_unit.py >/dev/null 2>&1; then
+            pytest -q tests/test_*_unit.py -v --tb=short
           else
-            if [ -f "tests/test_cleaning_unit.py" ]; then
-              pytest tests/test_cleaning_unit.py -v --tb=short
-            else
-              echo "No cleaning unit tests found, skipping..."
-            fi
+            echo "No unit tests found (tests/test_*_unit.py), skipping..."
           fi
 
-      - name: Run Integration Tests (per service)
+      - name: Run integration tests (if exist)
         run: |
+          set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
-
-          if [ "${{ matrix.service }}" = "booking_service" ]; then
-            if [ -f "tests/test_booking_integration.py" ]; then
-              pytest tests/test_booking_integration.py -v --tb=short
-            else
-              echo "No booking integration tests found, skipping..."
-            fi
+          if ls tests/test_*_integration.py >/dev/null 2>&1; then
+            pytest -q tests/test_*_integration.py -v --tb=short
           else
-            if [ -f "tests/test_cleaning_integration.py" ]; then
-              pytest tests/test_cleaning_integration.py -v --tb=short
-            else
-              echo "No cleaning integration tests found, skipping..."
-            fi
+            echo "No integration tests found (tests/test_*_integration.py), skipping..."
           fi
 
-  # 2) Сборка и публикация Docker-образов в DockerHub
-  build-and-push:
-    name: Build and push (DockerHub)
-    runs-on: ubuntu-latest
-    needs: [test-before-deploy]
-    strategy:
-      matrix:
-        service: [booking_service, cleaning_service]
-
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./${{ matrix.service }}/Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/miar-pr8-${{ matrix.service }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # 3) Сборка и публикация в Yandex Container Registry
   build-and-push-ycr:
     name: Build and push to YCR
     runs-on: ubuntu-latest
@@ -111,40 +64,144 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: ✅ Verify required secrets presence (safe)
+        run: |
+          set -euo pipefail
+
+          # Проверяем, что секреты реально есть (не печатаем значения)
+          [ -n "${{ secrets.YC_KEYS }}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
+          [ -n "${{ secrets.YC_REGISTRY_ID }}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
+
+          # Маскируем и печатаем только длины/префиксы
+          echo "YC_REGISTRY_ID length: ${#{{ secrets.YC_REGISTRY_ID }}}"
+          echo "YC_REGISTRY_ID prefix: $(echo '${{ secrets.YC_REGISTRY_ID }}' | cut -c1-3)***"
+
+      - name: 🔎 Parse YC_KEYS JSON (safe IDs only)
+        env:
+          YC_KEYS: ${{ secrets.YC_KEYS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import json, os
+j = json.loads(os.environ["YC_KEYS"])
+print("YC_KEYS.service_account_id =", j.get("service_account_id"))
+print("YC_KEYS.cloud_id          =", j.get("cloud_id"))
+print("YC_KEYS.folder_id         =", j.get("folder_id"))
+# ничего приватного не печатаем
+PY
+
       - name: Auth to Yandex Container Registry
         uses: yc-actions/yc-cr-login@v3
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
+      - name: 🧪 Smoke: docker is logged in & can see YCR registry
+        uses: yc-actions/yc-setup@v2
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
+
+      - name: 🧪 Smoke: yc CLI identity + registry list
+        run: |
+          set -euo pipefail
+          yc --version
+          yc config list || true
+
+          echo "Try list registries in current folder (may require permissions)..."
+          yc container registry list || true
+
+          echo "Try get registry by ID (from secret)..."
+          yc container registry get "${{ secrets.YC_REGISTRY_ID }}" || true
+
       - name: Build & push (latest + sha)
         run: |
+          set -euo pipefail
           IMAGE_BASE="cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}"
           IMAGE_LATEST="${IMAGE_BASE}:latest"
           IMAGE_SHA="${IMAGE_BASE}:${{ github.sha }}"
+
+          echo "Building service: ${{ matrix.service }}"
+          echo "IMAGE_LATEST=${IMAGE_LATEST}"
+          echo "IMAGE_SHA=${IMAGE_SHA}"
 
           docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_LATEST}" -t "${IMAGE_SHA}" .
           docker push "${IMAGE_LATEST}"
           docker push "${IMAGE_SHA}"
 
-
-  # 4) Деплой serverless-контейнеров в Yandex Cloud
   deploy-sls-yc:
     name: Deploy to Yandex Serverless Containers
     runs-on: ubuntu-latest
-    needs: [ build-and-push-ycr ]
+    needs: [build-and-push-ycr]
     strategy:
       matrix:
-        service: [ booking_service, cleaning_service ]
+        service: [booking_service, cleaning_service]
 
     steps:
-      - name: Deploy to Yandex Serverless Containers
+      - uses: actions/checkout@v4
+
+      - name: ✅ Verify deploy secrets presence (safe)
+        run: |
+          set -euo pipefail
+          [ -n "${{ secrets.YC_KEYS }}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
+          [ -n "${{ secrets.FOLDER_ID }}" ] || (echo "FOLDER_ID is EMPTY" && exit 1)
+          [ -n "${{ secrets.YC_REGISTRY_ID }}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
+          [ -n "${{ secrets.SA_ID }}" ] || (echo "SA_ID is EMPTY" && exit 1)
+
+          echo "FOLDER_ID length: ${#{{ secrets.FOLDER_ID }}}"
+          echo "FOLDER_ID prefix: $(echo '${{ secrets.FOLDER_ID }}' | cut -c1-4)***"
+          echo "SA_ID prefix: $(echo '${{ secrets.SA_ID }}' | cut -c1-4)***"
+          echo "REGISTRY prefix: $(echo '${{ secrets.YC_REGISTRY_ID }}' | cut -c1-3)***"
+
+      - name: 🔎 Parse YC_KEYS JSON (safe IDs only)
+        env:
+          YC_KEYS: ${{ secrets.YC_KEYS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import json, os
+j = json.loads(os.environ["YC_KEYS"])
+print("YC_KEYS.service_account_id =", j.get("service_account_id"))
+print("YC_KEYS.cloud_id          =", j.get("cloud_id"))
+print("YC_KEYS.folder_id         =", j.get("folder_id"))
+PY
+
+      - name: Setup yc CLI
+        uses: yc-actions/yc-setup@v2
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
+
+      - name: 🧪 Smoke: can list serverless containers (this is where PERMISSION_DENIED shows up)
+        run: |
+          set -euo pipefail
+          yc --version
+
+          echo "Listing containers in folder=${{ secrets.FOLDER_ID }} ..."
+          # Если тут PERMISSION_DENIED — значит у SA из YC_KEYS нет прав serverless-containers.*
+          yc serverless container list --folder-id "${{ secrets.FOLDER_ID }}"
+
+      - name: 🧪 Smoke: can get runtime service account
+        run: |
+          set -euo pipefail
+          echo "Getting runtime SA (SA_ID) ..."
+          yc iam service-account get "${{ secrets.SA_ID }}" || true
+
+      - name: 🧪 Smoke: can access registry by ID (pull permissions might be needed for runtime)
+        run: |
+          set -euo pipefail
+          yc container registry get "${{ secrets.YC_REGISTRY_ID }}" || true
+
+      - name: Deploy to Yandex Serverless Containers (SHA revision)
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.FOLDER_ID }}
           container-name: miar-pr8-${{ matrix.service }}
-          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:latest
+
+          # деплоим конкретный SHA, чтобы не зависеть от latest
+          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
+
+          # аккаунт, под которым контейнер будет запускаться и тянуть образ
           revision-service-account-id: ${{ secrets.SA_ID }}
+
           revision-cores: 1
           revision-memory: 512Mb
           revision-core-fraction: 100
@@ -152,10 +209,16 @@ jobs:
           revision-env: |
             ENV=prod
 
+      - name: ✅ Post-check: show deployed container
+        run: |
+          set -euo pipefail
+          echo "Container name: miar-pr8-${{ matrix.service }}"
+          yc serverless container get --name "miar-pr8-${{ matrix.service }}" --folder-id "${{ secrets.FOLDER_ID }}" || true
+
   all-deployed:
     name: All deployed
     runs-on: ubuntu-latest
-    needs: [ test-before-deploy, build-and-push-ycr, deploy-sls-yc ]
+    needs: [test-before-deploy, build-and-push-ycr, deploy-sls-yc]
     steps:
       - name: Done
         run: |
