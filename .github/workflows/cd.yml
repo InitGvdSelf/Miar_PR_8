@@ -24,10 +24,12 @@ jobs:
 
       - name: Install test dependencies
         run: |
+      - name: Install test dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install -r booking_service/requirements.txt
           pip install -r cleaning_service/requirements.txt
-          pip install pytest pytest-cov httpx
+          pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
       - name: Run Unit Tests (per service)
         env:

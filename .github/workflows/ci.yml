@@ -70,7 +70,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r booking_service/requirements.txt
           pip install -r cleaning_service/requirements.txt
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
       - name: Run Unit Tests
         run: |
