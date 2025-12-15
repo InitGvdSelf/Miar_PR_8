@@ -1,4 +1,4 @@
-name: CD - Build, Test and Deploy (with deep debug)
+name: CD - Build, Test and Deploy (debug)
 
 on:
   push:
@@ -64,19 +64,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: ✅ Verify required secrets presence (safe)
+      - name: Check required secrets are present
         run: |
           set -euo pipefail
-
-          # Проверяем, что секреты реально есть (не печатаем значения)
           [ -n "${{ secrets.YC_KEYS }}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
           [ -n "${{ secrets.YC_REGISTRY_ID }}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
-
-          # Маскируем и печатаем только длины/префиксы
-          echo "YC_REGISTRY_ID length: ${#{{ secrets.YC_REGISTRY_ID }}}"
           echo "YC_REGISTRY_ID prefix: $(echo '${{ secrets.YC_REGISTRY_ID }}' | cut -c1-3)***"
 
-      - name: 🔎 Parse YC_KEYS JSON (safe IDs only)
+      - name: Parse YC_KEYS JSON (print only IDs)
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
         run: |
@@ -87,7 +82,6 @@ j = json.loads(os.environ["YC_KEYS"])
 print("YC_KEYS.service_account_id =", j.get("service_account_id"))
 print("YC_KEYS.cloud_id          =", j.get("cloud_id"))
 print("YC_KEYS.folder_id         =", j.get("folder_id"))
-# ничего приватного не печатаем
 PY
 
       - name: Auth to Yandex Container Registry
@@ -95,34 +89,27 @@ PY
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: 🧪 Smoke: docker is logged in & can see YCR registry
+      - name: Setup yc CLI
         uses: yc-actions/yc-setup@v2
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: 🧪 Smoke: yc CLI identity + registry list
+      - name:
+        Smoke check: yc CLI and registry access
         run: |
           set -euo pipefail
           yc --version
           yc config list || true
-
-          echo "Try list registries in current folder (may require permissions)..."
-          yc container registry list || true
-
-          echo "Try get registry by ID (from secret)..."
           yc container registry get "${{ secrets.YC_REGISTRY_ID }}" || true
 
-      - name: Build & push (latest + sha)
+      - name: Build & push images (latest + sha)
         run: |
           set -euo pipefail
           IMAGE_BASE="cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}"
           IMAGE_LATEST="${IMAGE_BASE}:latest"
           IMAGE_SHA="${IMAGE_BASE}:${{ github.sha }}"
 
-          echo "Building service: ${{ matrix.service }}"
-          echo "IMAGE_LATEST=${IMAGE_LATEST}"
-          echo "IMAGE_SHA=${IMAGE_SHA}"
-
+          echo "Building ${IMAGE_LATEST} and ${IMAGE_SHA}"
           docker build -f ./${{ matrix.service }}/Dockerfile -t "${IMAGE_LATEST}" -t "${IMAGE_SHA}" .
           docker push "${IMAGE_LATEST}"
           docker push "${IMAGE_SHA}"
@@ -138,20 +125,18 @@ PY
     steps:
       - uses: actions/checkout@v4
 
-      - name: ✅ Verify deploy secrets presence (safe)
+      - name: Check deploy secrets are present
         run: |
           set -euo pipefail
           [ -n "${{ secrets.YC_KEYS }}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
           [ -n "${{ secrets.FOLDER_ID }}" ] || (echo "FOLDER_ID is EMPTY" && exit 1)
           [ -n "${{ secrets.YC_REGISTRY_ID }}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
           [ -n "${{ secrets.SA_ID }}" ] || (echo "SA_ID is EMPTY" && exit 1)
-
-          echo "FOLDER_ID length: ${#{{ secrets.FOLDER_ID }}}"
           echo "FOLDER_ID prefix: $(echo '${{ secrets.FOLDER_ID }}' | cut -c1-4)***"
           echo "SA_ID prefix: $(echo '${{ secrets.SA_ID }}' | cut -c1-4)***"
-          echo "REGISTRY prefix: $(echo '${{ secrets.YC_REGISTRY_ID }}' | cut -c1-3)***"
+          echo "YC_REGISTRY_ID prefix: $(echo '${{ secrets.YC_REGISTRY_ID }}' | cut -c1-3)***"
 
-      - name: 🔎 Parse YC_KEYS JSON (safe IDs only)
+      - name: Parse YC_KEYS JSON (print only IDs)
         env:
           YC_KEYS: ${{ secrets.YC_KEYS }}
         run: |
@@ -169,39 +154,27 @@ PY
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
 
-      - name: 🧪 Smoke: can list serverless containers (this is where PERMISSION_DENIED shows up)
+      - name:
+        Smoke check: can list serverless containers in folder
         run: |
           set -euo pipefail
           yc --version
-
-          echo "Listing containers in folder=${{ secrets.FOLDER_ID }} ..."
-          # Если тут PERMISSION_DENIED — значит у SA из YC_KEYS нет прав serverless-containers.*
           yc serverless container list --folder-id "${{ secrets.FOLDER_ID }}"
 
-      - name: 🧪 Smoke: can get runtime service account
+      - name:
+        Smoke check: runtime service account exists
         run: |
           set -euo pipefail
-          echo "Getting runtime SA (SA_ID) ..."
           yc iam service-account get "${{ secrets.SA_ID }}" || true
 
-      - name: 🧪 Smoke: can access registry by ID (pull permissions might be needed for runtime)
-        run: |
-          set -euo pipefail
-          yc container registry get "${{ secrets.YC_REGISTRY_ID }}" || true
-
-      - name: Deploy to Yandex Serverless Containers (SHA revision)
+      - name: Deploy serverless container (SHA revision)
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.FOLDER_ID }}
           container-name: miar-pr8-${{ matrix.service }}
-
-          # деплоим конкретный SHA, чтобы не зависеть от latest
-          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
-
-          # аккаунт, под которым контейнер будет запускаться и тянуть образ
           revision-service-account-id: ${{ secrets.SA_ID }}
-
+          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
           revision-cores: 1
           revision-memory: 512Mb
           revision-core-fraction: 100
@@ -209,10 +182,10 @@ PY
           revision-env: |
             ENV=prod
 
-      - name: ✅ Post-check: show deployed container
+      - name:
+        Post-check: show deployed container (best effort)
         run: |
           set -euo pipefail
-          echo "Container name: miar-pr8-${{ matrix.service }}"
           yc serverless container get --name "miar-pr8-${{ matrix.service }}" --folder-id "${{ secrets.FOLDER_ID }}" || true
 
   all-deployed:
