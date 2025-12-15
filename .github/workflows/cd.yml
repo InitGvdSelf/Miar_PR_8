@@ -128,8 +128,8 @@ jobs:
 
 
   # 4) Деплой serverless-контейнеров в Yandex Cloud
-  deploy-sls:
-    name: Deploy Serverless Containers
+  deploy-sls-yc:
+    name: Deploy to Yandex Serverless Containers
     runs-on: ubuntu-latest
     needs: [ build-and-push-ycr ]
     strategy:
@@ -137,30 +137,20 @@ jobs:
         service: [ booking_service, cleaning_service ]
 
     steps:
-      - name: Deploy serverless container
+      - name: Deploy to Yandex Serverless Containers
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
-          folder-id: ${{ secrets.YC_FOLDER_ID }}
-
-          # контейнеры будут называться: miar-pr8-booking_service и miar-pr8-cleaning_service
+          folder-id: ${{ secrets.FOLDER_ID }}
           container-name: miar-pr8-${{ matrix.service }}
-
-          # ID сервисного аккаунта, от имени которого будет работать ревизия
-          revision-service-account-id: ${{ secrets.YC_SA_ID }}
-
+          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:latest
+          revision-service-account-id: ${{ secrets.SA_ID }}
           revision-cores: 1
           revision-memory: 512Mb
           revision-core-fraction: 100
           revision-concurrency: 8
-          revision-execution-timeout: 10
-
-          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
-
-          # если нужны переменные окружения — раскомментируй и добавь secrets
-          # revision-env: |
-          #   AMQP_URL=${{ secrets.ENV_AMQP_URL }}
-          #   POSTGRES_URL=${{ secrets.ENV_POSTGRES_URL }}
+          revision-env: |
+            ENV=prod
 
   all-deployed:
     name: All deployed
