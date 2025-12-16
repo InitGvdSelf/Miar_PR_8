@@ -152,6 +152,7 @@ jobs:
           revision-env: |
             ENV=prod
 
+
   all-deployed:
     name: All deployed
     runs-on: ubuntu-latest
