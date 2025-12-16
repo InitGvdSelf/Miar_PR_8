@@ -5,6 +5,10 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # 1) Тесты (один раз на весь проект)
   test-before-deploy:
@@ -27,7 +31,7 @@ jobs:
           pip install -r cleaning_service/requirements.txt
           pip install pytest pytest-cov httpx prometheus-fastapi-instrumentator
 
-      - name: Run unit tests (if exist)
+      - name: Run unit tests if exist
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
@@ -37,7 +41,7 @@ jobs:
             echo "No unit tests found, skipping..."
           fi
 
-      - name: Run integration tests (if exist)
+      - name: Run integration tests if exist
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE"
@@ -47,7 +51,7 @@ jobs:
             echo "No integration tests found, skipping..."
           fi
 
-  # 2) Build+Push в Yandex Container Registry (как в методичке)
+  # 2) Build+Push в Yandex Container Registry (как в методичке через docker/login-action)
   build-and-push-ycr:
     name: Build and push to YC Registry
     runs-on: ubuntu-latest
@@ -68,6 +72,7 @@ jobs:
           set -euo pipefail
           [ -n "${YC_KEYS:-}" ] || (echo "YC_KEYS is EMPTY" && exit 1)
           [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
+          echo "YC_REGISTRY_ID looks like: ${YC_REGISTRY_ID:0:3}***"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -90,7 +95,7 @@ jobs:
             --tag "${IMAGE_BASE}:latest" \
             --tag "${IMAGE_BASE}:${GITHUB_SHA}"
 
-      - name: Push tag to YC Registry
+      - name: Push docker image
         env:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
@@ -99,7 +104,7 @@ jobs:
           docker push "${IMAGE_BASE}:latest"
           docker push "${IMAGE_BASE}:${GITHUB_SHA}"
 
-  # 3) Deploy в Serverless Containers (оставляем как у тебя, но уже после пуша в YCR)
+  # 3) Deploy в Serverless Containers (исправлено имя контейнера — только lowercase + '-')
   deploy-sls-yc:
     name: Deploy serverless containers
     runs-on: ubuntu-latest
@@ -123,12 +128,24 @@ jobs:
           [ -n "${SA_ID:-}" ] || (echo "SA_ID is EMPTY" && exit 1)
           [ -n "${YC_REGISTRY_ID:-}" ] || (echo "YC_REGISTRY_ID is EMPTY" && exit 1)
 
+      - name: Set container name (no underscores)
+        id: cname
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.service }}" = "booking_service" ]; then
+            echo "name=miar-pr8-booking-service" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=miar-pr8-cleaning-service" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved container-name: $(cat "$GITHUB_OUTPUT")"
+
       - name: Deploy to Yandex Serverless Containers
         uses: yc-actions/yc-sls-container-deploy@v4
         with:
           yc-sa-json-credentials: ${{ secrets.YC_KEYS }}
           folder-id: ${{ secrets.FOLDER_ID }}
-          container-name: miar-pr8-${{ matrix.service }}
+          container-name: ${{ steps.cname.outputs.name }}
           revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/miar-pr8-${{ matrix.service }}:${{ github.sha }}
           revision-service-account-id: ${{ secrets.SA_ID }}
           revision-cores: 1
